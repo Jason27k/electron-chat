@@ -62,6 +62,7 @@ const App: React.FC = () => {
   const [chatHistories, setChatHistories] = useState<ChatHistory[]>([]);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [showHistorySidebar, setShowHistorySidebar] = useState<boolean>(false);
+  const [showModelSidebar, setShowModelSidebar] = useState<boolean>(true); // New state for model sidebar visibility
 
   // Load chat histories from localStorage on component mount
   useEffect(() => {
@@ -76,33 +77,34 @@ const App: React.FC = () => {
     localStorage.setItem("chatHistories", JSON.stringify(chatHistories));
   }, [chatHistories]);
 
-  // Mutation for o3-mini
   const o3Mutation = useMutation({
-    mutationFn: (input: string) => sendPrompt(input),
+    mutationFn: (messages: Array<{ role: string; content: string }>) =>
+      sendPrompt(messages),
     onSuccess: handleApiSuccess,
   });
 
-  // Mutation for deepseek
   const deepseekMutation = useMutation({
-    mutationFn: (input: string) => sendPromptToDeepSeek(input),
+    mutationFn: (messages: Array<{ role: string; content: string }>) =>
+      sendPromptToDeepSeek(messages),
     onSuccess: handleApiSuccess,
   });
 
-  // Mutation for GPT-4o
   const gpt4oMutation = useMutation({
-    mutationFn: (input: string | { content: string; image: string }) =>
-      sendPromptToGpt4o(input),
+    mutationFn: (input: {
+      messages: Array<{ role: string; content: string }>;
+      image?: string;
+    }) => sendPromptToGpt4o(input.messages, input.image),
     onSuccess: handleApiSuccess,
   });
 
-  // Mutation for Gemini 2.0 Flash
   const geminiMutation = useMutation({
-    mutationFn: (input: string | { content: string; image: string }) =>
-      sendPromptToGemini(input),
+    mutationFn: (input: {
+      messages: Array<{ role: string; content: string }>;
+      image?: string;
+    }) => sendPromptToGemini(input.messages, input.image),
     onSuccess: handleApiSuccess,
   });
 
-  // Get the current active mutation based on selected model
   const getCurrentMutation = () => {
     switch (selectedModel) {
       case "o3-mini":
@@ -119,7 +121,7 @@ const App: React.FC = () => {
   };
 
   const currentMutation = getCurrentMutation();
-  const { mutate, isPending, error } = currentMutation;
+  const { isPending, error } = currentMutation;
 
   // Shared success handler for all mutations
   function handleApiSuccess(data: ApiResponse) {
@@ -155,6 +157,16 @@ const App: React.FC = () => {
     console.log("Full API response:", data);
   }
 
+  // Convert app messages to API format
+  const convertMessagesToApiFormat = (
+    messages: Message[]
+  ): Array<{ role: string; content: string }> => {
+    return messages.map((msg) => ({
+      role: msg.type === "user" ? "user" : "assistant",
+      content: msg.content,
+    }));
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!prompt.trim() && !selectedImage) return;
@@ -167,40 +179,51 @@ const App: React.FC = () => {
       timestamp: Date.now(),
     };
 
+    // Add the new user message to the messages array
+    const updatedMessages = [...messages, userMessage];
+    setMessages(updatedMessages);
+
     if (selectedImage) {
       const reader = new FileReader();
       reader.onload = () => {
         const imageDataUrl = reader.result as string;
         userMessage.images = [imageDataUrl];
-        setMessages((prev) => [...prev, userMessage]);
 
-        // Handle image upload for GPT-4o and Gemini
-        if (selectedModel === "gpt-4o" || selectedModel === "gemini-flash") {
-          const base64Image = imageDataUrl.split(",")[1];
+        // Get base64 image data
+        const base64Image = imageDataUrl.split(",")[1];
 
-          if (selectedModel === "gpt-4o") {
-            // Use the specific mutation directly instead of the generic mutate
-            gpt4oMutation.mutate({
-              content: prompt || "Analyze this image",
-              image: base64Image,
-            });
-          } else if (selectedModel === "gemini-flash") {
-            // Use the Gemini mutation for image
-            geminiMutation.mutate({
-              content: prompt || "Analyze this image",
-              image: base64Image,
-            });
-          }
-        } else {
-          // For other models, use the text prompt
-          mutate(prompt);
+        // Convert all messages to API format
+        const apiMessages = convertMessagesToApiFormat(updatedMessages);
+
+        if (selectedModel === "gpt-4o") {
+          // Use the specific mutation directly instead of the generic mutate
+          gpt4oMutation.mutate({
+            messages: apiMessages,
+            image: base64Image,
+          });
+        } else if (selectedModel === "gemini-flash") {
+          // Use the Gemini mutation for image
+          geminiMutation.mutate({
+            messages: apiMessages,
+            image: base64Image,
+          });
         }
       };
       reader.readAsDataURL(selectedImage);
     } else {
-      // Regular text prompt
-      setMessages((prev) => [...prev, userMessage]);
-      mutate(prompt);
+      // Regular text prompt with history
+      const apiMessages = convertMessagesToApiFormat(updatedMessages);
+
+      // Use the appropriate mutation based on selected model
+      if (selectedModel === "o3-mini") {
+        o3Mutation.mutate(apiMessages);
+      } else if (selectedModel === "deepseek") {
+        deepseekMutation.mutate(apiMessages);
+      } else if (selectedModel === "gpt-4o") {
+        gpt4oMutation.mutate({ messages: apiMessages });
+      } else if (selectedModel === "gemini-flash") {
+        geminiMutation.mutate({ messages: apiMessages });
+      }
     }
 
     // Clear inputs
@@ -351,150 +374,187 @@ const App: React.FC = () => {
     <div className="flex flex-col w-full h-screen overflow-hidden">
       <TitleBar title={`${getModelDisplayName(selectedModel)}`} />
       <div className="flex w-full flex-1 overflow-hidden">
-        {/* Model selection sidebar */}
-        <div className="w-[280px] bg-white border-r border-gray-200 flex flex-col h-full shadow-sm z-10">
-          <div className="p-6 flex-1 overflow-y-auto">
-            <div className="font-semibold mb-4 text-gray-800">
-              Select Model:
+        {/* Toggle button for model sidebar */}
+        <button
+          onClick={() => setShowModelSidebar(!showModelSidebar)}
+          className={`absolute top-16 left-0 z-20 p-2 bg-white border border-gray-200 rounded-r-lg shadow-sm hover:bg-gray-50 transition-all ${
+            showModelSidebar ? "left-[280px]" : "left-0"
+          }`}
+          aria-label={showModelSidebar ? "Hide sidebar" : "Show sidebar"}
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            className="h-5 w-5 text-gray-600"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            {showModelSidebar ? (
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M11 19l-7-7 7-7m8 14l-7-7 7-7"
+              />
+            ) : (
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M13 5l7 7-7 7M5 5l7 7-7 7"
+              />
+            )}
+          </svg>
+        </button>
+
+        {/* Model selection sidebar - conditionally rendered based on showModelSidebar */}
+        {showModelSidebar && (
+          <div className="w-[280px] bg-white border-r border-gray-200 flex flex-col h-full shadow-sm z-10">
+            <div className="p-6 flex-1 overflow-y-auto">
+              <div className="font-semibold mb-4 text-gray-800">
+                Select Model:
+              </div>
+              <div className="flex flex-col gap-4">
+                <label
+                  className={`flex items-start p-4 rounded-lg border border-gray-200 cursor-pointer transition-all ${
+                    selectedModel === "o3-mini"
+                      ? "bg-blue-50 border-blue-500"
+                      : ""
+                  } hover:bg-blue-50 hover:border-blue-500`}
+                >
+                  <input
+                    type="radio"
+                    name="model"
+                    value="o3-mini"
+                    checked={selectedModel === "o3-mini"}
+                    onChange={() => setSelectedModel("o3-mini")}
+                    disabled={isPending}
+                    className="mr-3 mt-1"
+                  />
+                  <div className="flex-1">
+                    <div className="font-semibold mb-1">OpenAI o3-mini</div>
+                    <div className="text-sm text-gray-500">
+                      Fast, efficient responses
+                    </div>
+                  </div>
+                </label>
+
+                <label
+                  className={`flex items-start p-4 rounded-lg border border-gray-200 cursor-pointer transition-all ${
+                    selectedModel === "gpt-4o"
+                      ? "bg-blue-50 border-blue-500"
+                      : ""
+                  } hover:bg-blue-50 hover:border-blue-500`}
+                >
+                  <input
+                    type="radio"
+                    name="model"
+                    value="gpt-4o"
+                    checked={selectedModel === "gpt-4o"}
+                    onChange={() => setSelectedModel("gpt-4o")}
+                    disabled={isPending}
+                    className="mr-3 mt-1"
+                  />
+                  <div className="flex-1">
+                    <div className="font-semibold mb-1">GPT-4o</div>
+                    <div className="text-sm text-gray-500">
+                      Advanced capabilities, more accurate
+                    </div>
+                  </div>
+                </label>
+
+                <label
+                  className={`flex items-start p-4 rounded-lg border border-gray-200 cursor-pointer transition-all ${
+                    selectedModel === "gemini-flash"
+                      ? "bg-blue-50 border-blue-500"
+                      : ""
+                  } hover:bg-blue-50 hover:border-blue-500`}
+                >
+                  <input
+                    type="radio"
+                    name="model"
+                    value="gemini-flash"
+                    checked={selectedModel === "gemini-flash"}
+                    onChange={() => setSelectedModel("gemini-flash")}
+                    disabled={isPending}
+                    className="mr-3 mt-1"
+                  />
+                  <div className="flex-1">
+                    <div className="font-semibold mb-1">Gemini 2.0 Flash</div>
+                    <div className="text-sm text-gray-500">
+                      Google's fast and powerful model
+                    </div>
+                  </div>
+                </label>
+
+                <label
+                  className={`flex items-start p-4 rounded-lg border border-gray-200 cursor-pointer transition-all ${
+                    selectedModel === "deepseek"
+                      ? "bg-blue-50 border-blue-500"
+                      : ""
+                  } hover:bg-blue-50 hover:border-blue-500`}
+                >
+                  <input
+                    type="radio"
+                    name="model"
+                    value="deepseek"
+                    checked={selectedModel === "deepseek"}
+                    onChange={() => setSelectedModel("deepseek")}
+                    disabled={isPending}
+                    className="mr-3 mt-1"
+                  />
+                  <div className="flex-1">
+                    <div className="font-semibold mb-1">DeepSeek</div>
+                    <div className="text-sm text-gray-500">
+                      Alternative model with unique strengths
+                    </div>
+                  </div>
+                </label>
+              </div>
             </div>
-            <div className="flex flex-col gap-4">
-              <label
-                className={`flex items-start p-4 rounded-lg border border-gray-200 cursor-pointer transition-all ${
-                  selectedModel === "o3-mini"
-                    ? "bg-blue-50 border-blue-500"
-                    : ""
-                } hover:bg-blue-50 hover:border-blue-500`}
-              >
-                <input
-                  type="radio"
-                  name="model"
-                  value="o3-mini"
-                  checked={selectedModel === "o3-mini"}
-                  onChange={() => setSelectedModel("o3-mini")}
-                  disabled={isPending}
-                  className="mr-3 mt-1"
-                />
-                <div className="flex-1">
-                  <div className="font-semibold mb-1">OpenAI o3-mini</div>
-                  <div className="text-sm text-gray-500">
-                    Fast, efficient responses
-                  </div>
-                </div>
-              </label>
 
-              <label
-                className={`flex items-start p-4 rounded-lg border border-gray-200 cursor-pointer transition-all ${
-                  selectedModel === "gpt-4o" ? "bg-blue-50 border-blue-500" : ""
-                } hover:bg-blue-50 hover:border-blue-500`}
+            {/* Chat history controls */}
+            <div className="p-4 border-t border-gray-200">
+              <button
+                onClick={() => setShowHistorySidebar(!showHistorySidebar)}
+                className="w-full py-2 px-4 bg-blue-100 text-blue-700 rounded-lg flex items-center justify-center gap-2 hover:bg-blue-200 transition-colors"
               >
-                <input
-                  type="radio"
-                  name="model"
-                  value="gpt-4o"
-                  checked={selectedModel === "gpt-4o"}
-                  onChange={() => setSelectedModel("gpt-4o")}
-                  disabled={isPending}
-                  className="mr-3 mt-1"
-                />
-                <div className="flex-1">
-                  <div className="font-semibold mb-1">GPT-4o</div>
-                  <div className="text-sm text-gray-500">
-                    Advanced capabilities, more accurate
-                  </div>
-                </div>
-              </label>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className="h-5 w-5"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+                <span>Chat History</span>
+              </button>
 
-              <label
-                className={`flex items-start p-4 rounded-lg border border-gray-200 cursor-pointer transition-all ${
-                  selectedModel === "gemini-flash"
-                    ? "bg-blue-50 border-blue-500"
-                    : ""
-                } hover:bg-blue-50 hover:border-blue-500`}
+              <button
+                onClick={startNewChat}
+                className="w-full mt-2 py-2 px-4 bg-gray-100 text-gray-700 rounded-lg flex items-center justify-center gap-2 hover:bg-gray-200 transition-colors"
               >
-                <input
-                  type="radio"
-                  name="model"
-                  value="gemini-flash"
-                  checked={selectedModel === "gemini-flash"}
-                  onChange={() => setSelectedModel("gemini-flash")}
-                  disabled={isPending}
-                  className="mr-3 mt-1"
-                />
-                <div className="flex-1">
-                  <div className="font-semibold mb-1">Gemini 2.0 Flash</div>
-                  <div className="text-sm text-gray-500">
-                    Google's fast and powerful model
-                  </div>
-                </div>
-              </label>
-
-              <label
-                className={`flex items-start p-4 rounded-lg border border-gray-200 cursor-pointer transition-all ${
-                  selectedModel === "deepseek"
-                    ? "bg-blue-50 border-blue-500"
-                    : ""
-                } hover:bg-blue-50 hover:border-blue-500`}
-              >
-                <input
-                  type="radio"
-                  name="model"
-                  value="deepseek"
-                  checked={selectedModel === "deepseek"}
-                  onChange={() => setSelectedModel("deepseek")}
-                  disabled={isPending}
-                  className="mr-3 mt-1"
-                />
-                <div className="flex-1">
-                  <div className="font-semibold mb-1">DeepSeek</div>
-                  <div className="text-sm text-gray-500">
-                    Alternative model with unique strengths
-                  </div>
-                </div>
-              </label>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className="h-5 w-5"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+                <span>New Chat</span>
+              </button>
             </div>
           </div>
-
-          {/* Chat history controls */}
-          <div className="p-4 border-t border-gray-200">
-            <button
-              onClick={() => setShowHistorySidebar(!showHistorySidebar)}
-              className="w-full py-2 px-4 bg-blue-100 text-blue-700 rounded-lg flex items-center justify-center gap-2 hover:bg-blue-200 transition-colors"
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="h-5 w-5"
-                viewBox="0 0 20 20"
-                fill="currentColor"
-              >
-                <path
-                  fillRule="evenodd"
-                  d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z"
-                  clipRule="evenodd"
-                />
-              </svg>
-              <span>Chat History</span>
-            </button>
-
-            <button
-              onClick={startNewChat}
-              className="w-full mt-2 py-2 px-4 bg-gray-100 text-gray-700 rounded-lg flex items-center justify-center gap-2 hover:bg-gray-200 transition-colors"
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="h-5 w-5"
-                viewBox="0 0 20 20"
-                fill="currentColor"
-              >
-                <path
-                  fillRule="evenodd"
-                  d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z"
-                  clipRule="evenodd"
-                />
-              </svg>
-              <span>New Chat</span>
-            </button>
-          </div>
-        </div>
+        )}
 
         {/* Chat history sidebar - conditionally rendered */}
         {showHistorySidebar && (
@@ -574,7 +634,11 @@ const App: React.FC = () => {
           </div>
         )}
 
-        <div className="flex-1 flex flex-col h-full bg-gray-50">
+        <div
+          className={`flex-1 flex flex-col h-full bg-gray-50 transition-all ${
+            !showModelSidebar ? "ml-0" : ""
+          }`}
+        >
           <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-4">
             {messages.length === 0 ? (
               <div className="flex items-center justify-center h-full text-gray-500">
