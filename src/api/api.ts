@@ -131,7 +131,10 @@ export const sendPromptToGpt4o = async (
 };
 
 // Function to send prompt to Gemini 2.0 Flash
-export const sendPromptToGemini = async (prompt: string) => {
+export const sendPromptToGemini = async (
+  input: string | { content: string; image: string }
+): Promise<ApiResponse> => {
+  console.log("Sending prompt to Gemini:", input);
   try {
     // Get API key from environment variable
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
@@ -142,6 +145,37 @@ export const sendPromptToGemini = async (prompt: string) => {
       );
     }
 
+    const isImageInput = typeof input !== "string";
+    let requestBody;
+
+    if (isImageInput) {
+      // For image + text input
+      requestBody = {
+        contents: [
+          {
+            parts: [
+              {
+                inlineData: {
+                  data: input.image,
+                  mimeType: "image/jpeg",
+                },
+              },
+              { text: input.content },
+            ],
+          },
+        ],
+      };
+    } else {
+      // For text-only input
+      requestBody = {
+        contents: [
+          {
+            parts: [{ text: input }],
+          },
+        ],
+      };
+    }
+
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
       {
@@ -149,13 +183,7 @@ export const sendPromptToGemini = async (prompt: string) => {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [{ text: prompt }],
-            },
-          ],
-        }),
+        body: JSON.stringify(requestBody),
       }
     );
 

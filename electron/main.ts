@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, ipcMain } from "electron";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -33,7 +33,41 @@ function createWindow() {
     icon: path.join(process.env.VITE_PUBLIC, "electron-vite.svg"),
     webPreferences: {
       preload: path.join(__dirname, "preload.mjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
     },
+    ...(process.platform === "darwin"
+      ? {
+          titleBarStyle: "hiddenInset",
+          trafficLightPosition: { x: 10, y: 10 },
+        }
+      : {
+          frame: false,
+        }),
+    minWidth: 800,
+    minHeight: 600,
+    backgroundColor: "#ffffff",
+  });
+
+  // Set up IPC listeners for window controls
+  ipcMain.on("window-control", (_, command) => {
+    if (!win) return;
+
+    switch (command) {
+      case "minimize":
+        win.minimize();
+        break;
+      case "maximize":
+        if (win.isMaximized()) {
+          win.unmaximize();
+        } else {
+          win.maximize();
+        }
+        break;
+      case "close":
+        win.close();
+        break;
+    }
   });
 
   // Test active push message to Renderer-process.
