@@ -1,44 +1,18 @@
 import React from "react";
 import { useState, useRef, useEffect } from "react";
-import { useMutation } from "@tanstack/react-query";
-import {
-  sendPrompt,
-  sendPromptToDeepSeek,
-  sendPromptToGpt4o,
-  sendPromptToGemini,
-} from "./api/api";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import TitleBar from "./components/TitleBar";
 
-// Define types for API responses
-interface ApiResponse {
-  choices: Array<{
-    message: {
-      content: string;
-      reasoning?: string;
-    };
-  }>;
-}
-
 // Define types for messages
 interface Message {
+  id?: string;
   type: "user" | "response";
   content: string;
   model?: string;
   images?: string[]; // Add images array to store image data URLs
   timestamp?: number; // Add timestamp for messages
-}
-
-// Define type for chat history
-interface ChatHistory {
-  id: string;
-  title: string;
-  model: string;
-  messages: Message[];
-  createdAt: number;
-  updatedAt: number;
 }
 
 // Define props for CodeBlock component
@@ -50,121 +24,150 @@ interface CodeBlockProps {
   [key: string]: unknown;
 }
 
+// Define the available models
+const MODELS = {
+  OPEN_AI: ["o3-mini", "gpt-4o"],
+  DEEPSEEK: ["deepseek-chat", "deepseek-reasoner"],
+  CLAUDE: ["claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022"],
+  GEMINI: ["gemini-2.0-flash"],
+};
+
+// Models that support image input
+const IMAGE_MODELS = [
+  "claude-3-7-sonnet-20250219",
+  "claude-3-5-haiku-20241022",
+  "gpt-4o",
+  "gemini-2.0-flash",
+];
+
 const App: React.FC = () => {
   const [prompt, setPrompt] = useState<string>("");
   const [messages, setMessages] = useState<Message[]>([]);
-  const [selectedModel, setSelectedModel] = useState<
-    "o3-mini" | "deepseek" | "gpt-4o" | "gemini-flash"
-  >("o3-mini"); // Default model
-  const [selectedImage, setSelectedImage] = useState<File | null>(null); // Add state for image
-  const [imagePreview, setImagePreview] = useState<string | null>(null); // Add state for image preview
+  const [selectedModel, setSelectedModel] =
+    useState<string>("gemini-2.0-flash"); // Default model
+  const [selectedImage, setSelectedImage] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [chatHistories, setChatHistories] = useState<ChatHistory[]>([]);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [showHistorySidebar, setShowHistorySidebar] = useState<boolean>(false);
-  const [showModelSidebar, setShowModelSidebar] = useState<boolean>(true); // New state for model sidebar visibility
+  const [showModelSidebar, setShowModelSidebar] = useState<boolean>(true);
+  const [isPending, setIsPending] = useState<boolean>(false);
+  const [error, setError] = useState<Error | null>(null);
+  const [conversationId, setConversationId] = useState<string>("0");
+  const [serverConversations, setServerConversations] = useState<any[]>([]);
 
-  // Load chat histories from localStorage on component mount
+  // Load conversations from the server
   useEffect(() => {
-    const savedHistories = localStorage.getItem("chatHistories");
-    if (savedHistories) {
-      setChatHistories(JSON.parse(savedHistories));
-    }
-  }, []);
-
-  // Save chat histories to localStorage whenever they change
-  useEffect(() => {
-    localStorage.setItem("chatHistories", JSON.stringify(chatHistories));
-  }, [chatHistories]);
-
-  const o3Mutation = useMutation({
-    mutationFn: (messages: Array<{ role: string; content: string }>) =>
-      sendPrompt(messages),
-    onSuccess: handleApiSuccess,
-  });
-
-  const deepseekMutation = useMutation({
-    mutationFn: (messages: Array<{ role: string; content: string }>) =>
-      sendPromptToDeepSeek(messages),
-    onSuccess: handleApiSuccess,
-  });
-
-  const gpt4oMutation = useMutation({
-    mutationFn: (input: {
-      messages: Array<{ role: string; content: string }>;
-      image?: string;
-    }) => sendPromptToGpt4o(input.messages, input.image),
-    onSuccess: handleApiSuccess,
-  });
-
-  const geminiMutation = useMutation({
-    mutationFn: (input: {
-      messages: Array<{ role: string; content: string }>;
-      image?: string;
-    }) => sendPromptToGemini(input.messages, input.image),
-    onSuccess: handleApiSuccess,
-  });
-
-  const getCurrentMutation = () => {
-    switch (selectedModel) {
-      case "o3-mini":
-        return o3Mutation;
-      case "deepseek":
-        return deepseekMutation;
-      case "gpt-4o":
-        return gpt4oMutation;
-      case "gemini-flash":
-        return geminiMutation;
-      default:
-        return o3Mutation;
-    }
-  };
-
-  const currentMutation = getCurrentMutation();
-  const { isPending, error } = currentMutation;
-
-  // Shared success handler for all mutations
-  function handleApiSuccess(data: ApiResponse) {
-    // Extract the response content from the API response structure
-    let responseContent = data.choices && data.choices[0]?.message?.content;
-
-    // Clean up LaTeX formatting for DeepSeek responses only
-    if (selectedModel === "deepseek" && responseContent) {
-      responseContent = responseContent
-        .replace(/\\boxed{/g, "") // Remove opening \boxed{
-        .replace(/}/g, "") // Remove closing }
-        .trim(); // Remove any extra whitespace
-    }
-
-    const newMessage = {
-      type: "response" as const,
-      model: selectedModel,
-      content: responseContent || "No response content found in API response",
-      timestamp: Date.now(),
+    const loadConversations = async () => {
+      const conversations = await fetchConversations();
+      setServerConversations(conversations);
     };
 
-    setMessages((prev) => [...prev, newMessage]);
+    loadConversations();
+    // Refresh conversations every 30 seconds
+    const intervalId = setInterval(loadConversations, 30000);
 
-    // Update chat history if we're in an existing chat
-    if (currentChatId) {
-      updateChatHistory(currentChatId, [...messages, newMessage]);
-    } else if (messages.length > 0) {
-      // Create a new chat history if this is the first response
-      createNewChatHistory([...messages, newMessage]);
+    return () => clearInterval(intervalId);
+  }, []);
+
+  // Function to send message to the API
+  const sendMessage = async (userPrompt: string, image: File | null) => {
+    setIsPending(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("model", selectedModel);
+      formData.append("prompt", userPrompt);
+      formData.append("max_history", "10");
+      formData.append("conversation_id", conversationId);
+
+      if (image) {
+        formData.append("image", image);
+      }
+
+      // Use fetch with SSE handling
+      const response = await fetch("http://127.0.0.1:8000/chat", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      // Get conversation ID from headers
+      const newConversationId = response.headers.get("X-Conversation-ID");
+      if (newConversationId) {
+        setConversationId(newConversationId);
+        setCurrentChatId(newConversationId);
+
+        // Refresh the conversation list to include the new conversation
+        const conversations = await fetchConversations();
+        setServerConversations(conversations);
+      }
+
+      // Create a placeholder for the streaming response
+      const streamingMessageId = Date.now().toString();
+
+      // Add an initial empty response message
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: streamingMessageId, // Add a unique ID to track this message
+          type: "response",
+          model: selectedModel,
+          content: "",
+          timestamp: Date.now(),
+        },
+      ]);
+
+      // Handle SSE response
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("Response body is null");
+
+      let responseText = "";
+      let buffer = "";
+
+      // Process the stream
+      let isDone = false;
+      while (!isDone) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        // Convert the chunk to text
+        const chunk = new TextDecoder().decode(value);
+        console.log(chunk);
+
+        // Add to buffer
+        buffer += chunk;
+
+        // Check if we've received the [DONE] marker
+        if (buffer.includes("[DONE]")) {
+          // Extract content before [DONE]
+          responseText += buffer.substring(0, buffer.indexOf("[DONE]"));
+          isDone = true;
+        } else {
+          responseText += buffer;
+          buffer = "";
+        }
+
+        // Update the streaming message by its ID
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === streamingMessageId
+              ? { ...msg, content: responseText, timestamp: Date.now() }
+              : msg
+          )
+        );
+      }
+
+      // No need to update chat history since it's managed by the server
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setIsPending(false);
     }
-
-    // Log the full response for debugging
-    console.log("Full API response:", data);
-  }
-
-  // Convert app messages to API format
-  const convertMessagesToApiFormat = (
-    messages: Message[]
-  ): Array<{ role: string; content: string }> => {
-    return messages.map((msg) => ({
-      role: msg.type === "user" ? "user" : "assistant",
-      content: msg.content,
-    }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -180,8 +183,7 @@ const App: React.FC = () => {
     };
 
     // Add the new user message to the messages array
-    const updatedMessages = [...messages, userMessage];
-    setMessages(updatedMessages);
+    setMessages((prev) => [...prev, userMessage]);
 
     if (selectedImage) {
       const reader = new FileReader();
@@ -189,41 +191,13 @@ const App: React.FC = () => {
         const imageDataUrl = reader.result as string;
         userMessage.images = [imageDataUrl];
 
-        // Get base64 image data
-        const base64Image = imageDataUrl.split(",")[1];
-
-        // Convert all messages to API format
-        const apiMessages = convertMessagesToApiFormat(updatedMessages);
-
-        if (selectedModel === "gpt-4o") {
-          // Use the specific mutation directly instead of the generic mutate
-          gpt4oMutation.mutate({
-            messages: apiMessages,
-            image: base64Image,
-          });
-        } else if (selectedModel === "gemini-flash") {
-          // Use the Gemini mutation for image
-          geminiMutation.mutate({
-            messages: apiMessages,
-            image: base64Image,
-          });
-        }
+        // Send the message with image
+        sendMessage(prompt, selectedImage);
       };
       reader.readAsDataURL(selectedImage);
     } else {
-      // Regular text prompt with history
-      const apiMessages = convertMessagesToApiFormat(updatedMessages);
-
-      // Use the appropriate mutation based on selected model
-      if (selectedModel === "o3-mini") {
-        o3Mutation.mutate(apiMessages);
-      } else if (selectedModel === "deepseek") {
-        deepseekMutation.mutate(apiMessages);
-      } else if (selectedModel === "gpt-4o") {
-        gpt4oMutation.mutate({ messages: apiMessages });
-      } else if (selectedModel === "gemini-flash") {
-        geminiMutation.mutate({ messages: apiMessages });
-      }
+      // Regular text prompt
+      sendMessage(prompt, null);
     }
 
     // Clear inputs
@@ -284,90 +258,232 @@ const App: React.FC = () => {
   };
 
   const getModelDisplayName = (modelId: string) => {
-    switch (modelId) {
-      case "o3-mini":
-        return "OpenAI o3-mini";
-      case "deepseek":
-        return "DeepSeek";
-      case "gpt-4o":
-        return "GPT-4o";
-      case "gemini-flash":
-        return "Gemini 2.0 Flash";
-      default:
-        return modelId;
-    }
-  };
-
-  // Create a new chat history
-  const createNewChatHistory = (msgs: Message[]) => {
-    // Generate a title from the first user message
-    const firstUserMsg = msgs.find((msg) => msg.type === "user");
-    const title = firstUserMsg
-      ? firstUserMsg.content.slice(0, 30) +
-        (firstUserMsg.content.length > 30 ? "..." : "")
-      : "New Chat";
-
-    const newChatHistory: ChatHistory = {
-      id: Date.now().toString(),
-      title,
-      model: selectedModel,
-      messages: msgs,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-
-    setChatHistories((prev) => [newChatHistory, ...prev]);
-    setCurrentChatId(newChatHistory.id);
-  };
-
-  // Update an existing chat history
-  const updateChatHistory = (chatId: string, msgs: Message[]) => {
-    setChatHistories((prev) =>
-      prev.map((chat) =>
-        chat.id === chatId
-          ? { ...chat, messages: msgs, updatedAt: Date.now() }
-          : chat
-      )
-    );
+    if (modelId.includes("o3-mini")) return "OpenAI o3-mini";
+    if (modelId.includes("gpt-4o")) return "GPT-4o";
+    if (modelId.includes("deepseek-chat")) return "DeepSeek Chat";
+    if (modelId.includes("deepseek-reasoner")) return "DeepSeek Reasoner";
+    if (modelId.includes("claude-3-7-sonnet")) return "Claude 3.7 Sonnet";
+    if (modelId.includes("claude-3-5-haiku")) return "Claude 3.5 Haiku";
+    if (modelId.includes("gemini-2.0-flash")) return "Gemini 2.0 Flash";
+    return modelId;
   };
 
   // Load a chat history
-  const loadChatHistory = (chatId: string) => {
-    const chat = chatHistories.find((c) => c.id === chatId);
-    if (chat) {
-      setMessages(chat.messages);
-      setSelectedModel(
-        chat.model as "o3-mini" | "deepseek" | "gpt-4o" | "gemini-flash"
-      );
-      setCurrentChatId(chatId);
-      setShowHistorySidebar(false);
+  const loadChatHistory = async (chatId: string) => {
+    setIsPending(true);
+
+    try {
+      const history = await fetchConversationHistory(chatId);
+
+      if (history) {
+        // Convert server messages format to our app format
+        const formattedMessages = history.history.map((msg: any) => ({
+          id: msg.id.toString(),
+          type: msg.role === "user" ? "user" : "response",
+          content: msg.content,
+          model: msg.model,
+          timestamp: new Date(msg.timestamp).getTime(),
+        }));
+
+        setMessages(formattedMessages);
+        setCurrentChatId(chatId);
+        setConversationId(chatId);
+
+        // If there's at least one message with a model, set that as the selected model
+        const lastModelMsg = [...formattedMessages]
+          .reverse()
+          .find((msg) => msg.model);
+        if (lastModelMsg?.model) {
+          setSelectedModel(lastModelMsg.model);
+        }
+
+        setShowHistorySidebar(false);
+      }
+    } catch (err) {
+      console.error("Error loading chat history:", err);
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setIsPending(false);
     }
   };
 
   // Start a new chat
-  const startNewChat = () => {
+  const startNewChat = async () => {
+    await saveCurrentChatBeforeSwitching();
     setMessages([]);
     setCurrentChatId(null);
+    setConversationId("0"); // Reset to default conversation ID
     setShowHistorySidebar(false);
   };
 
   // Delete a chat history
-  const deleteChatHistory = (chatId: string, e: React.MouseEvent) => {
+  const deleteChatHistory = async (chatId: string, e: React.MouseEvent) => {
     e.stopPropagation(); // Prevent triggering the parent click handler
-    setChatHistories((prev) => prev.filter((chat) => chat.id !== chatId));
-    if (currentChatId === chatId) {
-      startNewChat();
+
+    try {
+      await deleteConversation(chatId);
+
+      // Update the local state
+      setServerConversations((prev) =>
+        prev.filter((chat) => chat.id.toString() !== chatId)
+      );
+
+      if (currentChatId === chatId) {
+        startNewChat();
+      }
+    } catch (err) {
+      console.error("Error deleting chat history:", err);
+      setError(err instanceof Error ? err : new Error(String(err)));
     }
   };
 
-  // Format date for display
-  const formatDate = (timestamp: number) => {
-    return new Date(timestamp).toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+  // Function to check if a model supports image uploads
+  const modelSupportsImages = (model: string) => {
+    return IMAGE_MODELS.includes(model);
+  };
+
+  // Add these functions to fetch conversations and history from the API
+
+  // Function to fetch all conversations
+  const fetchConversations = async () => {
+    try {
+      const response = await fetch("http://127.0.0.1:8000/conversations");
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+      return await response.json();
+    } catch (err) {
+      console.error("Error fetching conversations:", err);
+      return [];
+    }
+  };
+
+  // Function to fetch conversation history
+  const fetchConversationHistory = async (conversationId: string) => {
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:8000/chat-history/${conversationId}?max_history=50`
+      );
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+      return await response.json();
+    } catch (err) {
+      console.error(`Error fetching conversation ${conversationId}:`, err);
+      return null;
+    }
+  };
+
+  // Function to delete a conversation
+  const deleteConversation = async (conversationId: string) => {
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:8000/conversations/${conversationId}`,
+        {
+          method: "DELETE",
+        }
+      );
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+      return await response.json();
+    } catch (err) {
+      console.error(`Error deleting conversation ${conversationId}:`, err);
+      return null;
+    }
+  };
+
+  // Add a function to save the current chat state before switching
+  const saveCurrentChatBeforeSwitching = async () => {
+    if (currentChatId && messages.length > 0) {
+      // We don't need to do anything here since the messages are saved on the server
+      // when they're sent. This is just a placeholder in case you want to add
+      // additional logic later.
+    }
+  };
+
+  // Modify the chat history sidebar to use server conversations
+  const renderChatHistorySidebar = () => {
+    return (
+      <div className="w-[300px] bg-white border-r border-gray-200 flex flex-col h-full shadow-sm z-10 overflow-y-auto">
+        <div className="p-4 border-b border-gray-200 flex justify-between items-center">
+          <h2 className="text-lg font-bold text-gray-800">Chat History</h2>
+          <button
+            onClick={() => setShowHistorySidebar(false)}
+            className="text-gray-500 hover:text-gray-700"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className="h-5 w-5"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+            >
+              <path
+                fillRule="evenodd"
+                d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                clipRule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-2">
+          {serverConversations.length === 0 ? (
+            <div className="text-center p-6 text-gray-500">
+              No chat history yet
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {serverConversations.map((chat) => (
+                <div
+                  key={chat.id}
+                  onClick={() => loadChatHistory(chat.id.toString())}
+                  className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                    currentChatId === chat.id.toString()
+                      ? "bg-blue-50 border-blue-500"
+                      : "border-gray-200 hover:bg-gray-50"
+                  }`}
+                >
+                  <div className="flex justify-between items-start">
+                    <div className="font-medium text-gray-800 truncate flex-1">
+                      {chat.title}
+                    </div>
+                    <button
+                      onClick={(e) => deleteChatHistory(chat.id.toString(), e)}
+                      className="text-gray-400 hover:text-red-500 ml-2"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        className="h-4 w-4"
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                      >
+                        <path
+                          fillRule="evenodd"
+                          d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z"
+                          clipRule="evenodd"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1 flex justify-between">
+                    <span>
+                      {new Date(chat.created_at).toLocaleDateString()}
+                    </span>
+                    <span>
+                      {new Date(chat.created_at).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -414,102 +530,161 @@ const App: React.FC = () => {
               <div className="font-semibold mb-4 text-gray-800">
                 Select Model:
               </div>
-              <div className="flex flex-col gap-4">
-                <label
-                  className={`flex items-start p-4 rounded-lg border border-gray-200 cursor-pointer transition-all ${
-                    selectedModel === "o3-mini"
-                      ? "bg-blue-50 border-blue-500"
-                      : ""
-                  } hover:bg-blue-50 hover:border-blue-500`}
-                >
-                  <input
-                    type="radio"
-                    name="model"
-                    value="o3-mini"
-                    checked={selectedModel === "o3-mini"}
-                    onChange={() => setSelectedModel("o3-mini")}
-                    disabled={isPending}
-                    className="mr-3 mt-1"
-                  />
-                  <div className="flex-1">
-                    <div className="font-semibold mb-1">OpenAI o3-mini</div>
-                    <div className="text-sm text-gray-500">
-                      Fast, efficient responses
-                    </div>
-                  </div>
-                </label>
 
-                <label
-                  className={`flex items-start p-4 rounded-lg border border-gray-200 cursor-pointer transition-all ${
-                    selectedModel === "gpt-4o"
-                      ? "bg-blue-50 border-blue-500"
-                      : ""
-                  } hover:bg-blue-50 hover:border-blue-500`}
-                >
-                  <input
-                    type="radio"
-                    name="model"
-                    value="gpt-4o"
-                    checked={selectedModel === "gpt-4o"}
-                    onChange={() => setSelectedModel("gpt-4o")}
-                    disabled={isPending}
-                    className="mr-3 mt-1"
-                  />
-                  <div className="flex-1">
-                    <div className="font-semibold mb-1">GPT-4o</div>
-                    <div className="text-sm text-gray-500">
-                      Advanced capabilities, more accurate
-                    </div>
-                  </div>
-                </label>
+              {/* OpenAI Models */}
+              <div className="mb-6">
+                <h3 className="text-sm font-semibold text-gray-600 mb-2">
+                  OpenAI
+                </h3>
+                <div className="flex flex-col gap-2">
+                  {MODELS.OPEN_AI.map((model) => (
+                    <label
+                      key={model}
+                      className={`flex items-start p-3 rounded-lg border border-gray-200 cursor-pointer transition-all ${
+                        selectedModel === model
+                          ? "bg-blue-50 border-blue-500"
+                          : ""
+                      } hover:bg-blue-50 hover:border-blue-500`}
+                    >
+                      <input
+                        type="radio"
+                        name="model"
+                        value={model}
+                        checked={selectedModel === model}
+                        onChange={() => setSelectedModel(model)}
+                        disabled={isPending}
+                        className="mr-3 mt-1"
+                      />
+                      <div className="flex-1">
+                        <div className="font-semibold text-sm">
+                          {getModelDisplayName(model)}
+                        </div>
+                        {modelSupportsImages(model) && (
+                          <div className="text-xs text-blue-600 mt-1">
+                            Supports images
+                          </div>
+                        )}
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
 
-                <label
-                  className={`flex items-start p-4 rounded-lg border border-gray-200 cursor-pointer transition-all ${
-                    selectedModel === "gemini-flash"
-                      ? "bg-blue-50 border-blue-500"
-                      : ""
-                  } hover:bg-blue-50 hover:border-blue-500`}
-                >
-                  <input
-                    type="radio"
-                    name="model"
-                    value="gemini-flash"
-                    checked={selectedModel === "gemini-flash"}
-                    onChange={() => setSelectedModel("gemini-flash")}
-                    disabled={isPending}
-                    className="mr-3 mt-1"
-                  />
-                  <div className="flex-1">
-                    <div className="font-semibold mb-1">Gemini 2.0 Flash</div>
-                    <div className="text-sm text-gray-500">
-                      Google's fast and powerful model
-                    </div>
-                  </div>
-                </label>
+              {/* Claude Models */}
+              <div className="mb-6">
+                <h3 className="text-sm font-semibold text-gray-600 mb-2">
+                  Claude
+                </h3>
+                <div className="flex flex-col gap-2">
+                  {MODELS.CLAUDE.map((model) => (
+                    <label
+                      key={model}
+                      className={`flex items-start p-3 rounded-lg border border-gray-200 cursor-pointer transition-all ${
+                        selectedModel === model
+                          ? "bg-blue-50 border-blue-500"
+                          : ""
+                      } hover:bg-blue-50 hover:border-blue-500`}
+                    >
+                      <input
+                        type="radio"
+                        name="model"
+                        value={model}
+                        checked={selectedModel === model}
+                        onChange={() => setSelectedModel(model)}
+                        disabled={isPending}
+                        className="mr-3 mt-1"
+                      />
+                      <div className="flex-1">
+                        <div className="font-semibold text-sm">
+                          {getModelDisplayName(model)}
+                        </div>
+                        {modelSupportsImages(model) && (
+                          <div className="text-xs text-blue-600 mt-1">
+                            Supports images
+                          </div>
+                        )}
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
 
-                <label
-                  className={`flex items-start p-4 rounded-lg border border-gray-200 cursor-pointer transition-all ${
-                    selectedModel === "deepseek"
-                      ? "bg-blue-50 border-blue-500"
-                      : ""
-                  } hover:bg-blue-50 hover:border-blue-500`}
-                >
-                  <input
-                    type="radio"
-                    name="model"
-                    value="deepseek"
-                    checked={selectedModel === "deepseek"}
-                    onChange={() => setSelectedModel("deepseek")}
-                    disabled={isPending}
-                    className="mr-3 mt-1"
-                  />
-                  <div className="flex-1">
-                    <div className="font-semibold mb-1">DeepSeek</div>
-                    <div className="text-sm text-gray-500">
-                      Alternative model with unique strengths
-                    </div>
-                  </div>
-                </label>
+              {/* DeepSeek Models */}
+              <div className="mb-6">
+                <h3 className="text-sm font-semibold text-gray-600 mb-2">
+                  DeepSeek
+                </h3>
+                <div className="flex flex-col gap-2">
+                  {MODELS.DEEPSEEK.map((model) => (
+                    <label
+                      key={model}
+                      className={`flex items-start p-3 rounded-lg border border-gray-200 cursor-pointer transition-all ${
+                        selectedModel === model
+                          ? "bg-blue-50 border-blue-500"
+                          : ""
+                      } hover:bg-blue-50 hover:border-blue-500`}
+                    >
+                      <input
+                        type="radio"
+                        name="model"
+                        value={model}
+                        checked={selectedModel === model}
+                        onChange={() => setSelectedModel(model)}
+                        disabled={isPending}
+                        className="mr-3 mt-1"
+                      />
+                      <div className="flex-1">
+                        <div className="font-semibold text-sm">
+                          {getModelDisplayName(model)}
+                        </div>
+                        {modelSupportsImages(model) && (
+                          <div className="text-xs text-blue-600 mt-1">
+                            Supports images
+                          </div>
+                        )}
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Gemini Models */}
+              <div className="mb-6">
+                <h3 className="text-sm font-semibold text-gray-600 mb-2">
+                  Gemini
+                </h3>
+                <div className="flex flex-col gap-2">
+                  {MODELS.GEMINI.map((model) => (
+                    <label
+                      key={model}
+                      className={`flex items-start p-3 rounded-lg border border-gray-200 cursor-pointer transition-all ${
+                        selectedModel === model
+                          ? "bg-blue-50 border-blue-500"
+                          : ""
+                      } hover:bg-blue-50 hover:border-blue-500`}
+                    >
+                      <input
+                        type="radio"
+                        name="model"
+                        value={model}
+                        checked={selectedModel === model}
+                        onChange={() => setSelectedModel(model)}
+                        disabled={isPending}
+                        className="mr-3 mt-1"
+                      />
+                      <div className="flex-1">
+                        <div className="font-semibold text-sm">
+                          {getModelDisplayName(model)}
+                        </div>
+                        {modelSupportsImages(model) && (
+                          <div className="text-xs text-blue-600 mt-1">
+                            Supports images
+                          </div>
+                        )}
+                      </div>
+                    </label>
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -557,82 +732,7 @@ const App: React.FC = () => {
         )}
 
         {/* Chat history sidebar - conditionally rendered */}
-        {showHistorySidebar && (
-          <div className="w-[300px] bg-white border-r border-gray-200 flex flex-col h-full shadow-sm z-10 overflow-y-auto">
-            <div className="p-4 border-b border-gray-200 flex justify-between items-center">
-              <h2 className="text-lg font-bold text-gray-800">Chat History</h2>
-              <button
-                onClick={() => setShowHistorySidebar(false)}
-                className="text-gray-500 hover:text-gray-700"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  className="h-5 w-5"
-                  viewBox="0 0 20 20"
-                  fill="currentColor"
-                >
-                  <path
-                    fillRule="evenodd"
-                    d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                    clipRule="evenodd"
-                  />
-                </svg>
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-2">
-              {chatHistories.length === 0 ? (
-                <div className="text-center p-6 text-gray-500">
-                  No chat history yet
-                </div>
-              ) : (
-                <div className="flex flex-col gap-2">
-                  {chatHistories.map((chat) => (
-                    <div
-                      key={chat.id}
-                      onClick={() => loadChatHistory(chat.id)}
-                      className={`p-3 rounded-lg border cursor-pointer transition-all ${
-                        currentChatId === chat.id
-                          ? "bg-blue-50 border-blue-500"
-                          : "border-gray-200 hover:bg-gray-50"
-                      }`}
-                    >
-                      <div className="flex justify-between items-start">
-                        <div className="font-medium text-gray-800 truncate flex-1">
-                          {chat.title}
-                        </div>
-                        <button
-                          onClick={(e) => deleteChatHistory(chat.id, e)}
-                          className="text-gray-400 hover:text-red-500 ml-2"
-                        >
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            className="h-4 w-4"
-                            viewBox="0 0 20 20"
-                            fill="currentColor"
-                          >
-                            <path
-                              fillRule="evenodd"
-                              d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z"
-                              clipRule="evenodd"
-                            />
-                          </svg>
-                        </button>
-                      </div>
-                      <div className="text-xs text-gray-500 mt-1 flex justify-between">
-                        <span>{getModelDisplayName(chat.model)}</span>
-                        <span>{formatDate(chat.updatedAt)}</span>
-                      </div>
-                      <div className="text-xs text-gray-400 mt-1 truncate">
-                        {chat.messages.length} messages
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+        {showHistorySidebar && renderChatHistorySidebar()}
 
         <div
           className={`flex-1 flex flex-col h-full bg-gray-50 transition-all ${
@@ -740,7 +840,7 @@ const App: React.FC = () => {
               <div className="max-w-[70%] self-center">
                 <div className="p-4 rounded-lg bg-red-50 text-red-600 border border-red-200 flex items-center gap-2">
                   <div className="text-lg">⚠️</div>
-                  <div>Error: {(error as Error).message}</div>
+                  <div>Error: {error.message}</div>
                 </div>
               </div>
             )}
@@ -751,24 +851,22 @@ const App: React.FC = () => {
             onSubmit={handleSubmit}
           >
             <div className="max-w-3xl mx-auto">
-              {(selectedModel === "gpt-4o" ||
-                selectedModel === "gemini-flash") &&
-                imagePreview && (
-                  <div className="mb-3 relative inline-block">
-                    <img
-                      src={imagePreview}
-                      alt="Preview"
-                      className="h-20 rounded-lg border border-gray-300 object-cover"
-                    />
-                    <button
-                      type="button"
-                      onClick={removeSelectedImage}
-                      className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center"
-                    >
-                      ×
-                    </button>
-                  </div>
-                )}
+              {modelSupportsImages(selectedModel) && imagePreview && (
+                <div className="mb-3 relative inline-block">
+                  <img
+                    src={imagePreview}
+                    alt="Preview"
+                    className="h-20 rounded-lg border border-gray-300 object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={removeSelectedImage}
+                    className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
               <div className="flex items-center gap-2">
                 <input
                   type="text"
@@ -778,8 +876,7 @@ const App: React.FC = () => {
                   disabled={isPending}
                   className="flex-1 p-2 border border-gray-300 rounded text-base"
                 />
-                {(selectedModel === "gpt-4o" ||
-                  selectedModel === "gemini-flash") && (
+                {modelSupportsImages(selectedModel) && (
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
@@ -816,9 +913,9 @@ const App: React.FC = () => {
                 >
                   {isPending ? (
                     <span className="flex gap-1">
-                      <span className="animate-loadingDots w-2 h-2 bg-gray-500 rounded-full"></span>
-                      <span className="animate-loadingDots [animation-delay:0.2s] w-2 h-2 bg-gray-500 rounded-full"></span>
-                      <span className="animate-loadingDots [animation-delay:0.4s] w-2 h-2 bg-gray-500 rounded-full"></span>
+                      <span className="animate-loadingDots w-2 h-2 bg-white rounded-full"></span>
+                      <span className="animate-loadingDots [animation-delay:0.2s] w-2 h-2 bg-white rounded-full"></span>
+                      <span className="animate-loadingDots [animation-delay:0.4s] w-2 h-2 bg-white rounded-full"></span>
                     </span>
                   ) : (
                     <>
