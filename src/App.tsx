@@ -6,12 +6,24 @@ import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import TitleBar from "./components/TitleBar";
 
 // Define types for messages
+interface DocumentInfo {
+  id: number;
+  name: string;
+  contentType: string;
+  size: number;
+  isTruncated: boolean;
+}
+
 interface Message {
   id?: string;
   type: "user" | "response";
   content: string;
   model?: string;
-  images?: string[]; // Add images array to store image data URLs
+  images?: string[]; // Array of image IDs or URLs
+  imageIds?: number[]; // Add imageIds array to store image IDs
+  documentIds?: number[]; // Add documentIds array to store document IDs
+  documents?: string[]; // Array of document names or URLs
+  documentInfo?: DocumentInfo[]; // Add documentInfo array to store detailed document information
   timestamp?: number; // Add timestamp for messages
 }
 
@@ -47,14 +59,43 @@ const App: React.FC = () => {
     useState<string>("gemini-2.0-flash"); // Default model
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [selectedDocument, setSelectedDocument] = useState<File | null>(null);
+  const [documentName, setDocumentName] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const documentInputRef = useRef<HTMLInputElement>(null);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [showHistorySidebar, setShowHistorySidebar] = useState<boolean>(false);
   const [showModelSidebar, setShowModelSidebar] = useState<boolean>(true);
   const [isPending, setIsPending] = useState<boolean>(false);
   const [error, setError] = useState<Error | null>(null);
   const [conversationId, setConversationId] = useState<string>("0");
-  const [serverConversations, setServerConversations] = useState<any[]>([]);
+  const [serverConversations, setServerConversations] = useState<
+    Conversation[]
+  >([]);
+
+  // Define Conversation type
+  interface Conversation {
+    id: number;
+    title: string;
+    created_at: string;
+  }
+
+  // Define ServerMessage type
+  interface ServerMessage {
+    id: number;
+    role: string;
+    content: string;
+    model: string;
+    timestamp: string;
+    image_id?: number;
+    document_id?: number;
+    document_info?: {
+      filename: string;
+      content_type: string;
+      size: number;
+      is_truncated: boolean;
+    };
+  }
 
   // Load conversations from the server
   useEffect(() => {
@@ -70,26 +111,93 @@ const App: React.FC = () => {
     return () => clearInterval(intervalId);
   }, []);
 
+  // Function to upload an image to the server
+  const uploadImage = async (file: File): Promise<number | null> => {
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch(
+        `${import.meta.env.VITE_SERVER_URL}/upload-image`,
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Image upload failed: ${response.status}`);
+      }
+
+      const data = await response.json();
+      console.log("Image uploaded successfully:", data);
+      return data.image_id;
+    } catch (err) {
+      console.error("Error uploading image:", err);
+      setError(err instanceof Error ? err : new Error(String(err)));
+      return null;
+    }
+  };
+
   // Function to send message to the API
-  const sendMessage = async (userPrompt: string, image: File | null) => {
+  const sendMessage = async (
+    userPrompt: string,
+    imageId: number | null,
+    documentId: number | null = null
+  ) => {
     setIsPending(true);
     setError(null);
 
     try {
-      const formData = new FormData();
-      formData.append("model", selectedModel);
-      formData.append("prompt", userPrompt);
-      formData.append("max_history", "10");
-      formData.append("conversation_id", conversationId);
+      // Determine which endpoint to use based on the content
+      let endpointUrl: string;
 
-      if (image) {
-        formData.append("image", image);
+      if (imageId !== null) {
+        endpointUrl = `${import.meta.env.VITE_SERVER_URL}/image-chat-stream`;
+      } else if (documentId !== null) {
+        endpointUrl = `${import.meta.env.VITE_SERVER_URL}/chat-with-document`;
+      } else {
+        endpointUrl = `${import.meta.env.VITE_SERVER_URL}/text-chat-stream`;
       }
 
-      // Use fetch with SSE handling
-      const response = await fetch("http://127.0.0.1:8000/chat", {
-        method: "POST",
-        body: formData,
+      // Build the URL with query parameters
+      const url = new URL(endpointUrl);
+      url.searchParams.append("model", selectedModel);
+      url.searchParams.append("prompt", userPrompt);
+      url.searchParams.append("max_history", "10");
+      url.searchParams.append("conversation_id", conversationId);
+
+      if (imageId !== null) {
+        url.searchParams.append("image_id", imageId.toString());
+      }
+
+      if (documentId !== null) {
+        url.searchParams.append("document_id", documentId.toString());
+      }
+
+      // Create a placeholder for the streaming response
+      const streamingMessageId = Date.now().toString();
+
+      // Add an initial empty response message
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: streamingMessageId,
+          type: "response",
+          model: selectedModel,
+          content: "",
+          timestamp: Date.now(),
+        },
+      ]);
+
+      // Create a controller to abort the fetch if needed
+      const controller = new AbortController();
+      const { signal } = controller;
+
+      // Use fetch with text streaming instead of EventSource
+      const response = await fetch(url.toString(), {
+        method: "GET",
+        signal,
       });
 
       if (!response.ok) {
@@ -107,63 +215,82 @@ const App: React.FC = () => {
         setServerConversations(conversations);
       }
 
-      // Create a placeholder for the streaming response
-      const streamingMessageId = Date.now().toString();
-
-      // Add an initial empty response message
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: streamingMessageId, // Add a unique ID to track this message
-          type: "response",
-          model: selectedModel,
-          content: "",
-          timestamp: Date.now(),
-        },
-      ]);
-
-      // Handle SSE response
+      // Get the reader from the response body
       const reader = response.body?.getReader();
       if (!reader) throw new Error("Response body is null");
 
+      // Create a decoder for the stream
+      const decoder = new TextDecoder();
       let responseText = "";
-      let buffer = "";
+      let done = false;
 
       // Process the stream
-      let isDone = false;
-      while (!isDone) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      while (!done) {
+        const result = await reader.read();
+        done = result.done;
 
-        // Convert the chunk to text
-        const chunk = new TextDecoder().decode(value);
-        console.log(chunk);
-
-        // Add to buffer
-        buffer += chunk;
-
-        // Check if we've received the [DONE] marker
-        if (buffer.includes("[DONE]")) {
-          // Extract content before [DONE]
-          responseText += buffer.substring(0, buffer.indexOf("[DONE]"));
-          isDone = true;
-        } else {
-          responseText += buffer;
-          buffer = "";
+        if (done) {
+          // Stream is complete
+          setIsPending(false);
+          break;
         }
 
-        // Update the streaming message by its ID
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === streamingMessageId
-              ? { ...msg, content: responseText, timestamp: Date.now() }
-              : msg
-          )
-        );
-      }
+        // Decode the chunk
+        const chunk = decoder.decode(result.value, { stream: true });
 
-      // No need to update chat history since it's managed by the server
+        // Process the SSE format - each line starts with "data: "
+        const lines = chunk.split("\n");
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            // Extract the data part (remove "data: " prefix)
+            // Use JSON.parse to handle quoted strings and preserve spaces
+            try {
+              const data = JSON.parse(line.substring(6));
+
+              // Check if we've received the [DONE] marker
+              if (data === "[DONE]") {
+                setIsPending(false);
+                done = true;
+                break;
+              }
+
+              // Append the data to the response text
+              responseText += data;
+
+              // Update the streaming message by its ID
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === streamingMessageId
+                    ? { ...msg, content: responseText, timestamp: Date.now() }
+                    : msg
+                )
+              );
+            } catch (e) {
+              // If JSON parsing fails, just use the raw string
+              const data = line.substring(6);
+
+              if (data === "[DONE]") {
+                setIsPending(false);
+                done = true;
+                break;
+              }
+
+              responseText += data;
+
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === streamingMessageId
+                    ? { ...msg, content: responseText, timestamp: Date.now() }
+                    : msg
+                )
+              );
+            }
+          }
+        }
+      }
     } catch (err) {
+      console.error("Stream error:", err);
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
       setIsPending(false);
@@ -172,40 +299,111 @@ const App: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!prompt.trim() && !selectedImage) return;
+    if (!prompt.trim() && !selectedImage && !selectedDocument) return;
 
-    // Add user message to chat with both prompt and image if present
+    // Add user message to chat with prompt, image, and/or document
     const userMessage: Message = {
       type: "user",
-      content: prompt || "Image upload",
+      content: prompt || (selectedImage ? "Image upload" : "Document upload"),
       images: [],
+      imageIds: [],
+      documents: [],
+      documentIds: [],
+      documentInfo: [],
       timestamp: Date.now(),
     };
+
+    let imageId: number | null = null;
+    let documentId: number | null = null;
+
+    // If there's a selected image, upload it first
+    if (selectedImage) {
+      imageId = await uploadImage(selectedImage);
+
+      if (imageId) {
+        // Store the image ID in the message
+        userMessage.imageIds = [imageId];
+
+        // Create image preview URL
+        const imageUrl = `${import.meta.env.VITE_SERVER_URL}/images/${imageId}`;
+        userMessage.images = [imageUrl];
+
+        console.log(`Image uploaded with ID: ${imageId}, URL: ${imageUrl}`);
+      } else {
+        console.error("Failed to upload image");
+        setError(new Error("Failed to upload image"));
+        return;
+      }
+    }
+
+    // If there's a selected document, upload it
+    if (selectedDocument) {
+      try {
+        const formData = new FormData();
+        formData.append("file", selectedDocument);
+        formData.append("file_type", selectedDocument.type);
+
+        const response = await fetch(
+          `${import.meta.env.VITE_SERVER_URL}/process-document`,
+          {
+            method: "POST",
+            body: formData,
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error(`Document upload failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log("Document uploaded successfully:", data);
+
+        documentId = data.document_id;
+
+        // Store the document ID in the message
+        userMessage.documentIds = [documentId || 0];
+
+        // Store the document name
+        userMessage.documents = [documentName || selectedDocument.name];
+
+        // Store detailed document information
+        userMessage.documentInfo = [
+          {
+            id: data.document_id,
+            name: data.filename,
+            contentType: data.content_type,
+            size: data.size,
+            isTruncated: data.is_truncated,
+          },
+        ];
+
+        console.log(
+          `Document uploaded with ID: ${documentId}, Name: ${data.filename}`
+        );
+      } catch (err) {
+        console.error("Error uploading document:", err);
+        setError(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+    }
 
     // Add the new user message to the messages array
     setMessages((prev) => [...prev, userMessage]);
 
-    if (selectedImage) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const imageDataUrl = reader.result as string;
-        userMessage.images = [imageDataUrl];
-
-        // Send the message with image
-        sendMessage(prompt, selectedImage);
-      };
-      reader.readAsDataURL(selectedImage);
-    } else {
-      // Regular text prompt
-      sendMessage(prompt, null);
-    }
+    // Send the message with image ID and/or document ID if available
+    sendMessage(prompt, imageId, documentId);
 
     // Clear inputs
     setPrompt("");
     setSelectedImage(null);
     setImagePreview(null);
+    setSelectedDocument(null);
+    setDocumentName(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
+    }
+    if (documentInputRef.current) {
+      documentInputRef.current.value = "";
     }
   };
 
@@ -230,6 +428,20 @@ const App: React.FC = () => {
     setImagePreview(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
+    }
+  };
+
+  const handleDocumentChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    setSelectedDocument(file || null);
+    setDocumentName(file ? file.name : null);
+  };
+
+  const removeSelectedDocument = () => {
+    setSelectedDocument(null);
+    setDocumentName(null);
+    if (documentInputRef.current) {
+      documentInputRef.current.value = "";
     }
   };
 
@@ -277,13 +489,45 @@ const App: React.FC = () => {
 
       if (history) {
         // Convert server messages format to our app format
-        const formattedMessages = history.history.map((msg: any) => ({
-          id: msg.id.toString(),
-          type: msg.role === "user" ? "user" : "response",
-          content: msg.content,
-          model: msg.model,
-          timestamp: new Date(msg.timestamp).getTime(),
-        }));
+        const formattedMessages = history.history.map((msg: ServerMessage) => {
+          const formattedMsg: Message = {
+            id: msg.id.toString(),
+            type: msg.role === "user" ? "user" : "response",
+            content: msg.content,
+            model: msg.model,
+            timestamp: new Date(msg.timestamp).getTime(),
+          };
+
+          // Add image information if present
+          if (msg.image_id) {
+            formattedMsg.imageIds = [msg.image_id];
+            formattedMsg.images = [
+              `${import.meta.env.VITE_SERVER_URL}/images/${msg.image_id}`,
+            ];
+          }
+
+          // Add document information if present
+          if (msg.document_id) {
+            formattedMsg.documentIds = [msg.document_id];
+
+            if (msg.document_info) {
+              formattedMsg.documentInfo = [
+                {
+                  id: msg.document_id,
+                  name: msg.document_info.filename,
+                  contentType: msg.document_info.content_type,
+                  size: msg.document_info.size,
+                  isTruncated: msg.document_info.is_truncated,
+                },
+              ];
+              formattedMsg.documents = [msg.document_info.filename];
+            } else {
+              formattedMsg.documents = [`Document ID: ${msg.document_id}`];
+            }
+          }
+
+          return formattedMsg;
+        });
 
         setMessages(formattedMessages);
         setCurrentChatId(chatId);
@@ -347,7 +591,9 @@ const App: React.FC = () => {
   // Function to fetch all conversations
   const fetchConversations = async () => {
     try {
-      const response = await fetch("http://127.0.0.1:8000/conversations");
+      const response = await fetch(
+        `${import.meta.env.VITE_SERVER_URL}/conversations`
+      );
       if (!response.ok) {
         throw new Error(`API error: ${response.status}`);
       }
@@ -362,7 +608,9 @@ const App: React.FC = () => {
   const fetchConversationHistory = async (conversationId: string) => {
     try {
       const response = await fetch(
-        `http://127.0.0.1:8000/chat-history/${conversationId}?max_history=50`
+        `${
+          import.meta.env.VITE_SERVER_URL
+        }/chat-history/${conversationId}?max_history=50`
       );
       if (!response.ok) {
         throw new Error(`API error: ${response.status}`);
@@ -378,7 +626,7 @@ const App: React.FC = () => {
   const deleteConversation = async (conversationId: string) => {
     try {
       const response = await fetch(
-        `http://127.0.0.1:8000/conversations/${conversationId}`,
+        `${import.meta.env.VITE_SERVER_URL}/conversations/${conversationId}`,
         {
           method: "DELETE",
         }
@@ -800,6 +1048,67 @@ const App: React.FC = () => {
                             ))}
                           </div>
                         )}
+                        {msg.documents && msg.documents.length > 0 && (
+                          <div className="flex flex-wrap gap-2 mt-2">
+                            {msg.documentInfo && msg.documentInfo.length > 0
+                              ? // Display detailed document info if available
+                                msg.documentInfo.map((doc, docIndex) => (
+                                  <div
+                                    key={docIndex}
+                                    className="flex flex-col p-3 bg-blue-50 border border-blue-200 rounded-lg w-full max-w-[250px]"
+                                  >
+                                    <div className="flex items-center mb-1">
+                                      <svg
+                                        xmlns="http://www.w3.org/2000/svg"
+                                        className="h-5 w-5 text-blue-500 mr-2"
+                                        viewBox="0 0 20 20"
+                                        fill="currentColor"
+                                      >
+                                        <path
+                                          fillRule="evenodd"
+                                          d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z"
+                                          clipRule="evenodd"
+                                        />
+                                      </svg>
+                                      <span className="text-sm font-medium text-blue-700 truncate">
+                                        {doc.name}
+                                      </span>
+                                    </div>
+                                    <div className="text-xs text-blue-600 ml-7">
+                                      {(doc.size / 1024).toFixed(1)} KB
+                                      {doc.isTruncated && (
+                                        <span className="ml-2 text-amber-600 font-medium">
+                                          (Truncated)
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))
+                              : // Fallback to simple document display
+                                msg.documents.map((doc, docIndex) => (
+                                  <div
+                                    key={docIndex}
+                                    className="flex items-center p-2 bg-blue-50 border border-blue-200 rounded-lg"
+                                  >
+                                    <svg
+                                      xmlns="http://www.w3.org/2000/svg"
+                                      className="h-5 w-5 text-blue-500 mr-2"
+                                      viewBox="0 0 20 20"
+                                      fill="currentColor"
+                                    >
+                                      <path
+                                        fillRule="evenodd"
+                                        d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z"
+                                        clipRule="evenodd"
+                                      />
+                                    </svg>
+                                    <span className="text-sm text-blue-700">
+                                      {doc}
+                                    </span>
+                                  </div>
+                                ))}
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <ReactMarkdown
@@ -851,22 +1160,52 @@ const App: React.FC = () => {
             onSubmit={handleSubmit}
           >
             <div className="max-w-3xl mx-auto">
-              {modelSupportsImages(selectedModel) && imagePreview && (
-                <div className="mb-3 relative inline-block">
-                  <img
-                    src={imagePreview}
-                    alt="Preview"
-                    className="h-20 rounded-lg border border-gray-300 object-cover"
-                  />
-                  <button
-                    type="button"
-                    onClick={removeSelectedImage}
-                    className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center"
-                  >
-                    ×
-                  </button>
-                </div>
-              )}
+              <div className="flex flex-wrap gap-3 mb-3">
+                {modelSupportsImages(selectedModel) && imagePreview && (
+                  <div className="relative inline-block">
+                    <img
+                      src={imagePreview}
+                      alt="Preview"
+                      className="h-20 rounded-lg border border-gray-300 object-cover"
+                    />
+                    <button
+                      type="button"
+                      onClick={removeSelectedImage}
+                      className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center"
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
+
+                {documentName && (
+                  <div className="relative inline-flex items-center p-2 bg-blue-50 border border-blue-200 rounded-lg">
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      className="h-5 w-5 text-blue-500 mr-2"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                    <span className="text-sm text-blue-700">
+                      {documentName}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={removeSelectedDocument}
+                      className="ml-2 text-red-500 hover:text-red-700"
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
+              </div>
+
               <div className="flex items-center gap-2">
                 <input
                   type="text"
@@ -876,13 +1215,53 @@ const App: React.FC = () => {
                   disabled={isPending}
                   className="flex-1 p-2 border border-gray-300 rounded text-base"
                 />
-                {modelSupportsImages(selectedModel) && (
+
+                <div className="flex gap-1">
+                  {modelSupportsImages(selectedModel) && (
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isPending || selectedDocument !== null}
+                      className={`p-2 border border-gray-300 rounded bg-white hover:bg-gray-50 transition-colors ${
+                        selectedDocument !== null
+                          ? "opacity-50 cursor-not-allowed"
+                          : ""
+                      }`}
+                      title="Upload image"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        className="h-5 w-5 text-gray-600"
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                      >
+                        <path
+                          fillRule="evenodd"
+                          d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z"
+                          clipRule="evenodd"
+                        />
+                      </svg>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleImageChange}
+                        disabled={isPending || selectedDocument !== null}
+                        className="hidden"
+                        ref={fileInputRef}
+                      />
+                    </button>
+                  )}
+
                   <button
                     type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={isPending}
-                    className="p-2 border border-gray-300 rounded bg-white hover:bg-gray-50 transition-colors"
-                    title="Upload image"
+                    onClick={() => documentInputRef.current?.click()}
+                    disabled={isPending || selectedImage !== null}
+                    className={`p-2 border border-gray-300 rounded bg-white hover:bg-gray-50 transition-colors ${
+                      selectedImage !== null
+                        ? "opacity-50 cursor-not-allowed"
+                        : ""
+                    }`}
+                    title="Upload document"
                   >
                     <svg
                       xmlns="http://www.w3.org/2000/svg"
@@ -892,23 +1271,27 @@ const App: React.FC = () => {
                     >
                       <path
                         fillRule="evenodd"
-                        d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z"
+                        d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z"
                         clipRule="evenodd"
                       />
                     </svg>
                     <input
                       type="file"
-                      accept="image/*"
-                      onChange={handleImageChange}
-                      disabled={isPending}
+                      accept=".pdf,.doc,.docx,.txt"
+                      onChange={handleDocumentChange}
+                      disabled={isPending || selectedImage !== null}
                       className="hidden"
-                      ref={fileInputRef}
+                      ref={documentInputRef}
                     />
                   </button>
-                )}
+                </div>
+
                 <button
                   type="submit"
-                  disabled={isPending || (!prompt.trim() && !selectedImage)}
+                  disabled={
+                    isPending ||
+                    (!prompt.trim() && !selectedImage && !selectedDocument)
+                  }
                   className="flex items-center gap-1 p-2 bg-blue-600 text-white rounded disabled:bg-gray-400 disabled:cursor-not-allowed"
                 >
                   {isPending ? (
